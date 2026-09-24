@@ -119,3 +119,25 @@ and commit the resulting index changes. This does not remove old Git history.
 See [data setup and attribution](data/README.md) for the directory layout and
 the source of the raw files. Selected plots or result summaries can be shared
 separately when needed; the entire generated results directory need not be committed.
+
+## Stage 3: controlled numerical comparison
+
+Stage 3 compares power iteration, MCW, PW, PPW and directed forest estimators
+with repeated trials, explicit sample/propagation budgets, and saved per-trial
+estimates. It reloads Stage 2 networks and truth, so raw StatsBomb data is not
+needed after Stage 2 output has been produced.
+
+```bash
+# Smoke validation only: all available competitions, three trials
+.venv/bin/python experiments/stage3/run_all.py --quick \
+  --stage2-results results/stage2 --output results/stage3_quick
+
+# Full study: all 100 team-match networks from a full Stage 2 manifest
+.venv/bin/python experiments/stage3/run_all.py \
+  --stage2-results results/stage2 --output results/stage3
+```
+
+The full command keeps 30 stochastic repetitions and the configured budgets;
+use a separate output path for smaller pilots. See the
+[Stage 3 guide](experiments/stage3/README.md) and the generated manifest for
+coverage and resolved settings.
