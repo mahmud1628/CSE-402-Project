@@ -1,0 +1,12 @@
+pvr_code
+Numerical_Analysis (2).pdf
+pvr_SIGMOD-full-version.pdf
+3589305.pdf
+PROJECT_CONTEXT.md
+.venv/
+results/
+__pycache__/
+*.pyc
+.pytest_cache/
+.venv
+TESTING.md
