@@ -19,7 +19,7 @@ The paper uses the opposite convention, **paper α = 1 − our α**. So the pape
 ```bash
 python3 -m venv .venv
 .venv/bin/pip install -r requirements.txt
-.venv/bin/python -m pytest -q tests          # 28 tests: correctness, unbiasedness, variance lemmas
+.venv/bin/python -m pytest -q tests          # Stage 1 and football correctness tests
 ```
 
 ## Library layout (`pprlib/`)
@@ -82,3 +82,40 @@ cd experiments/stage1
 | `e7_relative_error.py` | (ε, 1/n, 1/n) relative-error guarantee with theory-derived T and K | Figs. 7–8 |
 
 Datasets: email-Eu-core (directed, 1,005 nodes), wiki-Vote (directed, 7,115 nodes, 1,005 dangling), ca-GrQc (undirected, 5,242 nodes), and com-youtube (undirected, 1.13M nodes, 2.99M edges, the paper's Youtube). They are downloaded from SNAP into `data/` on first use. We run the paper's two regimes, α = 0.8 and α = 0.99.
+
+## Stage 2: football passing networks
+
+The `football/` package loads local StatsBomb data, builds weighted directed
+player networks, and computes exact centrality, single-source and positional
+PPR using the unchanged `pprlib` API. The selected 50 matches are bundled in
+`experiments/stage2/selected_matches.json`; event/lineup files remain in the
+project's `data/` directory, alongside the Stage 1 benchmark archives.
+
+```bash
+.venv/bin/python -m pytest -q tests
+cd experiments/stage2
+../../.venv/bin/python run_all.py --quick  # 5 matches, all four competitions
+../../.venv/bin/python run_all.py          # all 50 selected matches
+```
+
+Results go to `results/stage2/`, including reloadable networks, exact ground
+truth for Stage 3, rankings and PNG figures. See
+[the Stage 2 guide](experiments/stage2/README.md) for modelling choices,
+filter options, output schemas and reproducible usage.
+
+## Data and Git
+
+Local football data lives in `data/events/`, `data/lineups/`, `data/matches/`
+and `data/competitions.json`. Keep the code, tests, requirements, documentation
+and `experiments/stage2/selected_matches.json` in Git. That selection manifest
+records the 50 matches needed to reproduce Stage 2 without uploading all raw data.
+
+Raw football JSON, benchmark archives, generated `results/`, `.venv/` and caches
+are ignored. Existing tracked benchmark archives remain tracked: `.gitignore`
+only prevents new untracked files from being added. To stop tracking those
+archives while keeping local copies, run `git rm --cached -- data/*.txt.gz`
+and commit the resulting index changes. This does not remove old Git history.
+
+See [data setup and attribution](data/README.md) for the directory layout and
+the source of the raw files. Selected plots or result summaries can be shared
+separately when needed; the entire generated results directory need not be committed.
