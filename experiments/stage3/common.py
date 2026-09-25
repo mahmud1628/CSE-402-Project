@@ -241,15 +241,110 @@ def _trial_file(output: Path) -> Path:
     return Path(output) / "tables" / "trials.csv"
 
 
+KEY_COLUMNS = ["experiment", "network_id", "source_id", "alpha", "method", "trial", "T", "F", "K", "B"]
+SORT_COLUMNS = ["experiment", "network_id", "source_id", "alpha", "method", "trial"]
+
+
 def read_trials(output: Path) -> pd.DataFrame:
     p = _trial_file(output)
     return pd.read_csv(p) if p.exists() else pd.DataFrame(columns=TRIAL_COLUMNS)
 
 
-def _save_trials(output: Path, frame: pd.DataFrame):
-    frame = frame.reindex(columns=TRIAL_COLUMNS)
-    frame.sort_values(["experiment", "network_id", "source_id", "alpha", "method", "trial"], inplace=True)
-    frame.to_csv(_trial_file(output), index=False)
+# One in-memory index per output folder, so each execute_trials call costs
+# O(its own trials) instead of re-reading and rewriting the whole CSV.
+_TRIAL_INDEX: dict[str, dict] = {}
+
+
+def _trial_index(output: Path) -> dict:
+    """{"keys": set of trial keys, "configs": config key -> list of row dicts}."""
+    name = str(Path(output).resolve())
+    if name not in _TRIAL_INDEX:
+        index = {"keys": set(), "configs": {}}
+        for row in read_trials(output).to_dict("records"):
+            key = tuple(row[c] for c in KEY_COLUMNS)
+            index["keys"].add(key)
+            index["configs"].setdefault(key[:5] + key[6:], []).append(row)
+        _TRIAL_INDEX[name] = index
+    return _TRIAL_INDEX[name]
+
+
+def _append_trials(output: Path, rows: list[dict]):
+    path = _trial_file(output)
+    header = not path.exists() or path.stat().st_size == 0
+    pd.DataFrame(rows).reindex(columns=TRIAL_COLUMNS).to_csv(path, mode="a", header=header, index=False)
+
+
+def sort_trials(output: Path):
+    """Sort the append-only trial CSV once, after an experiment's loop."""
+    path = _trial_file(output)
+    if path.exists():
+        frame = read_trials(output).reindex(columns=TRIAL_COLUMNS)
+        frame.sort_values(SORT_COLUMNS, inplace=True, kind="stable")
+        frame.to_csv(path, index=False)
+
+
+_STATS = {"computed_trials": 0}
+PROGRESS_INTERVAL = 15.0  # seconds between heartbeat lines
+
+
+def _clock(seconds: float) -> str:
+    seconds = int(round(seconds))
+    h, rem = divmod(seconds, 3600); m, s = divmod(rem, 60)
+    return f"{h}h{m:02d}m" if h else (f"{m}m{s:02d}s" if m else f"{s}s")
+
+
+def track(label: str, jobs: list, output: Path | None = None, describe=None, resumable: bool = True):
+    """Yield ``jobs`` while printing progress, so a long run never looks stuck.
+
+    A line is printed when a new network starts, and at least every
+    ``PROGRESS_INTERVAL`` seconds.  Cached (resumed) configurations are counted
+    but excluded from the ETA rate (``resumable=False`` counts every job).  With ``output``, the latest status is also
+    written to ``<output>/progress.json`` for checking from another terminal.
+    """
+    import time
+    total, start = len(jobs), time.monotonic()
+    last_print, last_network, work_time, worked = -np.inf, None, 0.0, 0
+    status_path = Path(output) / "progress.json" if output is not None else None
+    networks = list(dict.fromkeys(j["network"].network_id for j in jobs if "network" in j))
+
+    def report(done, job, final=False):
+        nonlocal last_print
+        now = time.monotonic(); elapsed = now - start
+        eta = work_time / worked * (total - done) if worked else None
+        where = ""
+        if job is not None and "network" in job:
+            nid = job["network"].network_id
+            where = f" | network {networks.index(nid) + 1}/{len(networks)} {nid}"
+        what = f" | {describe(job)}" if describe and job is not None else ""
+        timing = f" | elapsed {_clock(elapsed)}" + ("" if final else (f" | ETA ~{_clock(eta)}" if eta is not None else " | ETA: measuring"))
+        state = "done" if final else "running"
+        print(f"[{label}] {time.strftime('%H:%M:%S')} | {done}/{total} ({100 * done / max(total, 1):.0f}%)"
+              f"{where}{what}{timing}" + (" | finished" if final else ""), flush=True)
+        if status_path is not None:
+            payload = dict(step=label, state=state, done=done, total=total, elapsed_seconds=round(elapsed, 1),
+                           eta_seconds=None if final or eta is None else round(eta, 1),
+                           current=(describe(job) if describe and job is not None else None),
+                           network=(job["network"].network_id if job is not None and "network" in job else None),
+                           updated=time.strftime("%Y-%m-%d %H:%M:%S"))
+            tmp = status_path.with_suffix(".tmp"); tmp.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+            os.replace(tmp, status_path)
+        last_print = now
+
+    for done, job in enumerate(jobs):
+        nid = job["network"].network_id if "network" in job else None
+        if nid != last_network or time.monotonic() - last_print >= PROGRESS_INTERVAL:
+            report(done, job)
+            last_network = nid
+        before, t0 = _STATS["computed_trials"], time.monotonic()
+        yield job
+        if not resumable or _STATS["computed_trials"] > before:  # this job did real work (not resumed from cache)
+            work_time += time.monotonic() - t0; worked += 1
+    report(total, None, final=True)
+
+
+def describe_trial_job(job: dict) -> str:
+    budget = f"T={job['T']}" if job.get("T") else f"F={job.get('F', 0)}"
+    return f"{job.get('cohort', '')} {job['source_id']} a={job['alpha']:g} {budget} {job['method']} K={job.get('K', 0)} B={job.get('B', 1)}"
 
 
 def _run_method(g, sigma, alpha, method, seed, *, T=0, F=0, K=0, B=1, residuals=False):
@@ -273,16 +368,17 @@ def execute_trials(args, cfg, *, experiment: str, cohort: str, network: Network,
                    K: int = 0, B: int = 1, residuals: bool = False) -> pd.DataFrame:
     """Run/cache deterministic child trials, including every raw estimate as an .npy array."""
     paths = output_paths(args.output)
-    current = read_trials(args.output)
+    index = _trial_index(args.output)
+    existing = index["keys"]
     truth = truth_for(args.stage2_results, network, alpha, source_id, sigma)
     rows = []
-    existing = {tuple(x) for x in current[["experiment", "network_id", "source_id", "alpha", "method", "trial", "T", "F", "K", "B"]].itertuples(index=False, name=None)} if len(current) else set()
     for trial in range(cfg["trials"]):
         key = trial_key(experiment, network, source_id, alpha, method, trial, T, F, K, B)
         if key in existing:
             continue
         seed = stable_seed(cfg["root_seed"], experiment, network.network_id, source_id, alpha, method, trial, T, F, K, B)
         result = _run_method(network.graph, sigma, alpha, method, seed, T=T, F=F, K=K, B=B, residuals=residuals)
+        _STATS["computed_trials"] += 1
         estimate_rel = f"estimates/{hashlib.sha256(repr(key).encode()).hexdigest()}.npy"
         np.save(paths["root"] / estimate_rel, result.estimate)
         finite = bool(np.all(np.isfinite(result.estimate)))
@@ -301,23 +397,25 @@ def execute_trials(args, cfg, *, experiment: str, cohort: str, network: Network,
                          status="ok" if finite else "nonfinite",
                          residual_l1=json.dumps(np.asarray(hist.get("residual_l1", [])).tolist()),
                          batch_sizes=json.dumps(hist.get("batch_sizes", [])), estimate_path=estimate_rel))
+    config_key = trial_key(experiment, network, source_id, alpha, method, 0, T, F, K, B)
+    config_key = config_key[:5] + config_key[6:]
     if rows:
-        combined = pd.DataFrame(rows) if current.empty else pd.concat([current, pd.DataFrame(rows)], ignore_index=True)
-        _save_trials(args.output, combined)
-    all_rows = read_trials(args.output)
-    # Bracket access is intentional: DataFrame attributes such as ``T`` and
-    # ``method`` are not reliably the columns of the same name.
-    mask = ((all_rows["experiment"] == experiment) & (all_rows["network_id"] == network.network_id) &
-            (all_rows["source_id"] == source_id) & (all_rows["alpha"] == alpha) & (all_rows["method"] == method) &
-            (all_rows["T"] == T) & (all_rows["F"] == F) & (all_rows["K"] == K) & (all_rows["B"] == B))
-    return all_rows.loc[mask].copy()
+        # Appended once per configuration: an interrupted run loses at most
+        # this configuration's trials, which resume then recomputes.
+        _append_trials(args.output, rows)
+        for row in rows:
+            existing.add(trial_key(experiment, network, source_id, alpha, method, row["trial"], T, F, K, B))
+        index["configs"].setdefault(config_key, []).extend(rows)
+    return pd.DataFrame(index["configs"].get(config_key, []), columns=TRIAL_COLUMNS)
 
 
 def summarize(output: Path, stage2: Path, networks: dict[str, Network], trials: pd.DataFrame) -> pd.DataFrame:
     """Per-configuration summaries; finite-sample variance, MSE and bias stay distinct."""
     rows = []
     group_cols = ["experiment", "cohort", "network_id", "match_id", "competition", "source_id", "alpha", "method", "T", "F", "K", "B"]
-    for key, d in trials.groupby(group_cols, dropna=False):
+    groups = [dict(key=k, d=g) for k, g in trials.groupby(group_cols, dropna=False)]
+    for job in track("summary", groups, output, lambda j: f"{j['key'][2]} {j['key'][5]} a={j['key'][6]:g} {j['key'][7]}", resumable=False):
+        key, d = job["key"], job["d"]
         d = d[d.status == "ok"]
         out = dict(zip(group_cols, key), n_trials=int(len(d)), failures=int((trials.loc[d.index, "status"] != "ok").sum()))
         for metric in ("l1", "l2", "sq_l2", "tau", "topk_overlap", "seconds", "mass", "minimum", "n_walk_steps", "n_power_iterations"):

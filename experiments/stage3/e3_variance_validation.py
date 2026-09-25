@@ -11,7 +11,9 @@ def run(args):
     cfg=config(args); nets=load_networks(args.stage2_results); run_manifest(args,cfg,nets); trials=read_trials(args.output)
     if trials.empty: raise RuntimeError("run e2_error_vs_samples.py before E3 so variance uses the cached trials")
     index={n.network_id:n for n in nets}; rows=[]
-    for keys,d in trials[trials["experiment"].eq("walks")].groupby(["network_id","source_id","alpha","method","T","K","B"]):
+    groups=[dict(keys=k,d=g) for k,g in trials[trials["experiment"].eq("walks")].groupby(["network_id","source_id","alpha","method","T","K","B"])]
+    for job in track("E3 variance",groups,args.output,lambda j: f"{j['keys'][0]} {j['keys'][1]} a={j['keys'][2]:g} T={j['keys'][4]} {j['keys'][3]}",resumable=False):
+        keys,d=job["keys"],job["d"]
         nid,sid,alpha,method,T,K,B=keys; net=index[nid]; sigma=dict(source_specs(net,True)).get(sid,pl.uniform(net.graph)); truth=truth_for(args.stage2_results,net,alpha,sid,sigma)
         X=np.stack([np.load(Path(args.output)/p) for p in d.estimate_path]); mse=float(((X-truth)**2).sum(axis=1).mean()); empirical=float(X.var(axis=0,ddof=1).sum()) if len(X)>1 else np.nan
         theory=np.nan

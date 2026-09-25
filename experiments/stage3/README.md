@@ -20,6 +20,25 @@ uses 30 trials and 1,000/3,000/10,000/30,000 walk budgets. Use `--trials` and
 Compatible trial rows resume automatically; a changed resolved configuration
 requires a new output directory.
 
+### Progress and resuming
+
+Each step prints a progress line whenever it starts a new network, and at
+least every 15 seconds. The line shows configurations done out of the total,
+the current network, the source, α, the budget and method, elapsed time, and an
+ETA. The ETA is based on configurations actually computed, not ones resumed from
+the cache. The latest status is also written to `<output>/progress.json`:
+
+```bash
+cat results/stage3/progress.json
+```
+
+Trials are saved to `tables/trials.csv` after every configuration (30 trials).
+If a run is interrupted, re-run the same command. At most one configuration is
+recomputed.
+
+Measured runtime of the full study on an Apple-silicon laptop is about 1.5 hours
+from scratch. α = 0.99 dominates, because its walks average about 100 steps.
+
 ## What is measured
 
 - E1 saves exact/power convergence histories and 1e-4/1e-6/1e-8 targets.

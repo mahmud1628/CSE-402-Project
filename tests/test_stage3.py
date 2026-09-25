@@ -53,3 +53,19 @@ def test_small_end_to_end_e1_e2(tmp_path):
     assert (args.output / "figures" / "e1_power_convergence.png").exists()
     assert (args.output / "tables" / "trials.csv").exists()
     assert not summary.empty
+
+
+def test_append_only_cache_resumes_without_duplicates(tmp_path):
+    args = _args(tmp_path); cfg = common.config(args); nets = common.load_networks(args.stage2_results); net = nets[0]
+    common.run_manifest(args, cfg, nets); sigma = common.pl.uniform(net.graph)
+    kw = dict(experiment="unit", cohort="secondary", network=net, source_id="uniform", sigma=sigma, alpha=.8, method="pw", T=50, K=2)
+    first = common.execute_trials(args, cfg, **kw)
+    common.execute_trials(args, cfg, **kw)                      # cached in memory
+    common._TRIAL_INDEX.clear()                                 # simulate a fresh process resuming
+    cfg["trials"] = 3                                           # appending a trial keeps earlier streams
+    resumed = common.execute_trials(args, cfg, **kw)
+    on_disk = common.read_trials(args.output)
+    assert len(on_disk) == 3 and on_disk[common.KEY_COLUMNS].duplicated().sum() == 0
+    assert list(resumed.sort_values("trial")["l1"][:2]) == pytest.approx(list(first.sort_values("trial")["l1"]))
+    common.sort_trials(args.output)
+    assert len(common.read_trials(args.output)) == 3

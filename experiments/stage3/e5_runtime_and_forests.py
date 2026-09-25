@@ -11,14 +11,19 @@ def run(args):
     cfg=config(args); all_nets=load_networks(args.stage2_results); nets=choose_secondary(match_networks(all_nets),cfg["quick"])
     if cfg["network_limit"]: nets=nets[:cfg["network_limit"]]
     run_manifest(args,cfg,all_nets)
+    jobs=[]
     for net in nets:
       for sid,sigma in source_specs(net,False):
        for alpha in cfg["alphas"]:
         for T in cfg["walk_budgets"]:
-         for method in WALK_METHODS: execute_trials(args,cfg,experiment="runtime_forests",cohort="secondary",network=net,source_id=sid,sigma=sigma,alpha=alpha,method=method,T=T,K=0 if method=="mcw" else (cfg["pw_K"] if method=="pw" else cfg["ppw_K"]),B=cfg["ppw_B"] if method=="ppw" else 1)
+         # Same keys as E2's walk trials, so these are reused from the cache rather than rerun.
+         for method in WALK_METHODS: jobs.append(dict(experiment="walks",cohort="secondary",network=net,source_id=sid,sigma=sigma,alpha=alpha,method=method,T=T,K=0 if method=="mcw" else (cfg["pw_K"] if method=="pw" else cfg["ppw_K"]),B=cfg["ppw_B"] if method=="ppw" else 1,residuals=method=="ppw"))
         for F in cfg["forest_budgets"]:
-         for method in FOREST_METHODS: execute_trials(args,cfg,experiment="runtime_forests",cohort="secondary",network=net,source_id=sid,sigma=sigma,alpha=alpha,method=method,F=F,K=0 if method=="mcf" else (cfg["pw_K"] if method=="pf" else cfg["ppw_K"]),B=cfg["ppw_B"] if method=="ppf" else 1)
-    summary=summarize(args.output,args.stage2_results,{n.network_id:n for n in all_nets},read_trials(args.output)); d=summary[summary["experiment"].eq("runtime_forests")]; rows=[]
+         for method in FOREST_METHODS: jobs.append(dict(experiment="runtime_forests",cohort="secondary",network=net,source_id=sid,sigma=sigma,alpha=alpha,method=method,F=F,K=0 if method=="mcf" else (cfg["pw_K"] if method=="pf" else cfg["ppw_K"]),B=cfg["ppw_B"] if method=="ppf" else 1))
+    for job in track("E5 runtime/forests",jobs,args.output,describe_trial_job): execute_trials(args,cfg,**job)
+    sort_trials(args.output); summary=summarize(args.output,args.stage2_results,{n.network_id:n for n in all_nets},read_trials(args.output))
+    ids={n.network_id for n in nets}; walks=summary["experiment"].eq("walks")&summary["network_id"].isin(ids)&summary["source_id"].eq("uniform")
+    d=summary[summary["experiment"].eq("runtime_forests")|walks]; rows=[]
     for keys,x in d.groupby(["network_id","source_id","alpha","method"]):
       for target in (1e-2,1e-3):
        hit=x[x["l1"]<=target].sort_values(["T","F"])

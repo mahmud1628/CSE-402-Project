@@ -3,28 +3,28 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 try:  # package import for tests; direct-script import for the documented command
-    from .common import config, load_networks, match_networks, output_paths, parse_args, run_manifest, save_figure, truth_for, pl, mpl
+    from .common import config, load_networks, match_networks, output_paths, parse_args, run_manifest, save_figure, truth_for, track, pl, mpl
 except ImportError:  # pragma: no cover
-    from common import config, load_networks, match_networks, output_paths, parse_args, run_manifest, save_figure, truth_for, pl, mpl
+    from common import config, load_networks, match_networks, output_paths, parse_args, run_manifest, save_figure, truth_for, track, pl, mpl
 
 def run(args):
     cfg = config(args); all_networks = load_networks(args.stage2_results); nets = match_networks(all_networks)
     if args.quick: nets = nets[:min(4, len(nets))]
     if cfg["network_limit"]: nets = nets[:cfg["network_limit"]]
     run_manifest(args, cfg, all_networks); paths = output_paths(args.output); rows = []
-    for net in nets:
-        sigma = pl.uniform(net.graph)
-        for alpha in cfg["alphas"]:
-            truth = truth_for(args.stage2_results, net, alpha, "uniform", sigma)
-            exact = pl.compute_ppr(net.graph, sigma, alpha, "exact")
-            power = pl.power_iteration(net.graph, sigma, alpha, tol=1e-13, exact=truth)
-            err, diff = power.history["error"], power.history["diff"]
-            for k in range(len(err)):
-                rows.append(dict(network_id=net.network_id, match_id=net.match_id, competition=net.competition, alpha=alpha,
-                                 iteration=k, l1_error=err[k], prior_bound=2 * alpha ** k,
-                                 posterior_bound=(alpha / (1-alpha) * diff[k-1]) if k else np.nan,
-                                 step_norm=diff[k-1] if k else np.nan, exact_seconds=exact.time,
-                                 power_seconds=power.time, power_iterations=power.n_power_iterations))
+    jobs = [dict(network=net, alpha=alpha) for net in nets for alpha in cfg["alphas"]]
+    for job in track("E1 power", jobs, args.output, lambda j: f"a={j['alpha']:g}", resumable=False):
+        net, alpha = job["network"], job["alpha"]; sigma = pl.uniform(net.graph)
+        truth = truth_for(args.stage2_results, net, alpha, "uniform", sigma)
+        exact = pl.compute_ppr(net.graph, sigma, alpha, "exact")
+        power = pl.power_iteration(net.graph, sigma, alpha, tol=1e-13, exact=truth)
+        err, diff = power.history["error"], power.history["diff"]
+        for k in range(len(err)):
+            rows.append(dict(network_id=net.network_id, match_id=net.match_id, competition=net.competition, alpha=alpha,
+                             iteration=k, l1_error=err[k], prior_bound=2 * alpha ** k,
+                             posterior_bound=(alpha / (1-alpha) * diff[k-1]) if k else np.nan,
+                             step_norm=diff[k-1] if k else np.nan, exact_seconds=exact.time,
+                             power_seconds=power.time, power_iterations=power.n_power_iterations))
     frame = pd.DataFrame(rows); frame.to_csv(paths["tables"] / "power_convergence.csv", index=False)
     targets = []
     for (nid, alpha), d in frame.groupby(["network_id", "alpha"]):
